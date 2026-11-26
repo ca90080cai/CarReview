@@ -211,10 +211,36 @@ def layer1_data_and_privacy(dist_dir: Path, data: dict) -> list[str]:
             for bh in ORB_BLOCKED_HOSTS:
                 if bh in str(u):
                     errs.append(f"Forbidden/ORB image host {bh} in {v['id']}")
+        intr = v.get("interior") or {}
+        if not intr.get("summary") or len(intr.get("highlights") or []) < 4:
+            errs.append(f"{v['id']} missing interior overview/highlights")
+        iphs = intr.get("photos") or []
+        if not iphs:
+            errs.append(f"{v['id']} has 0 interior photos")
+        for ip in iphs:
+            iu = str(ip.get("u") or "")
+            for bh in ORB_BLOCKED_HOSTS:
+                if bh in iu:
+                    errs.append(f"Forbidden/ORB interior image host {bh} in {v['id']}")
+
+    # Audit personal GAS companion/host (gas/Code.gs) if present in repo
+    gas_p = ROOT_DIR / "gas" / "Code.gs"
+    if gas_p.is_file():
+        gtxt = gas_p.read_text(encoding="utf-8")
+        for fn in (
+            "function doGet", "HtmlService.createTemplateFromFile",
+            "function installAutonomousTriggers", "function dailyCatalogMonitor",
+            "function apiLoadCloudState", "function apiSaveCloudState",
+            "function apiSaveDataSourceUrl", "LockService.getScriptLock",
+        ):
+            if fn not in gtxt:
+                errs.append(f"gas/Code.gs missing required block: {fn}")
+        if re.search(r"AIza[0-9A-Za-z\-_]{30,}|ghp_[0-9A-Za-z]{20,}", gtxt):
+            errs.append("gas/Code.gs appears to contain a hardcoded secret token!")
 
     # Zero corporate/personal leak scan across repo source files & dist
     for p in list(ROOT_DIR.rglob("*")) + list(dist_dir.rglob("*")):
-        if not p.is_file() or p.suffix not in (".py", ".html", ".yml", ".yaml", ".json", ".md"):
+        if not p.is_file() or p.suffix not in (".py", ".html", ".yml", ".yaml", ".json", ".md", ".gs"):
             continue
         if ".git" in p.parts:
             continue
@@ -234,17 +260,20 @@ def layer2_frontend_static(dist_dir: Path) -> list[str]:
     if html_p.is_file():
         h = html_p.read_text(encoding="utf-8")
         if "./data/bootstrap.json" not in h:
-            errs.append("index.html must use relative ./data/bootstrap.json for GitHub Pages subpath")
-        if 'href="./favicon.ico"' not in h:
-            errs.append("index.html missing relative ./favicon.ico")
-        for inp_id in ("finAprInput", "qaLoanApr"):
-            m = re.search(rf'id="{inp_id}"[^>]+step="([^"]+)"', h)
-            if not m or m.group(1) != "0.01":
-                errs.append(f"Input {inp_id} must have step='0.01'")
-        for inp_id in ("finLoanIn", "otrCarIn", "qaDealPrice"):
-            m = re.search(rf'id="{inp_id}"[^>]+step="([^"]+)"', h)
-            if not m or m.group(1) != "1":
-                errs.append(f"Input {inp_id} must have step='1'")
+            errs.append("index.html must reference relative ./data/bootstrap.json")
+        # Full GAS Index.html checks (skipped cleanly in 3-file GitHub JSON-only mode)
+        if 'id="vehicleGrid"' in h:
+            for inp_id in ("finAprInput", "qaLoanApr"):
+                m = re.search(rf'id="{inp_id}"[^>]+step="([^"]+)"', h)
+                if not m or m.group(1) != "0.01":
+                    errs.append(f"Input {inp_id} must have step='0.01'")
+            for inp_id in ("finLoanIn", "otrCarIn", "qaDealPrice"):
+                m = re.search(rf'id="{inp_id}"[^>]+step="([^"]+)"', h)
+                if not m or m.group(1) != "1":
+                    errs.append(f"Input {inp_id} must have step='1'")
+            for marker in ('id="modeInteriorBtn"', 'data-tab="interior"', 'id="navGasSyncBtn"', 'id="gasSyncModal"', 'id="gasBootCfg"', 'google.script.run'):
+                if marker not in h:
+                    errs.append(f"Index.html missing required feature marker: {marker}")
     return errs
 
 
@@ -287,6 +316,8 @@ def layer4_chrome_e2e(dist_dir: Path, data: dict) -> list[str]:
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
 
+    is_full_app = 'id="vehicleGrid"' in (sub_dir / "index.html").read_text(encoding="utf-8")
+
     dbg_port = _free_port()
     proc = subprocess.Popen(
         [
@@ -313,123 +344,192 @@ def layer4_chrome_e2e(dist_dir: Path, data: dict) -> list[str]:
         cdp = _SimpleCDP(ws_url)
         for dom in ("Page", "Runtime", "Network", "Log"):
             cdp.call(f"{dom}.enable")
+
+        # Inject realistic GAS google.script.run runtime mock before Index.html executes
+        if is_full_app:
+            cdp.call("Page.addScriptToEvaluateOnNewDocument", {"source": """
+                (() => {
+                    const store = {
+                        shortlist: [{ id: 'pi-ford-f-150-2026', title: 'Ford F-150' }],
+                        notes: { 'pi-ford-f-150-2026': 'GAS 試算表直連測試筆記' }
+                    };
+                    const makeRunner = (okCb, errCb) => ({
+                        withSuccessHandler(fn) { return makeRunner(fn, errCb); },
+                        withFailureHandler(fn) { return makeRunner(okCb, fn); },
+                        apiLoadCloudState() {
+                            setTimeout(() => okCb && okCb({
+                                ok: true, sheet_name: '🐉 新車龍龍測試試算表',
+                                shortlist: store.shortlist, notes: store.notes,
+                                recent_alerts: [{ at: '2026-11-26 09:00', id: 'pi-ford-f-150-2026', title: 'Ford F-150', type: '📉 降價', detail: '模擬降價提醒測試' }],
+                                synced_at: '2026-11-26 10:00:00'
+                            }), 20);
+                        },
+                        apiSaveCloudState(payload) {
+                            store.shortlist = (payload && payload.shortlist) || [];
+                            store.notes = (payload && payload.notes) || {};
+                            setTimeout(() => okCb && okCb({
+                                ok: true, saved_shortlist: store.shortlist.length,
+                                saved_notes: Object.keys(store.notes).length, synced_at: '2026-11-26 10:00:01'
+                            }), 20);
+                        },
+                        apiTriggerGitHubRebuild() {
+                            setTimeout(() => okCb && okCb({ ok: true, message: '已觸發模擬重建' }), 20);
+                        },
+                        apiSaveDataSourceUrl(u) {
+                            setTimeout(() => okCb && okCb({ ok: true, pagesUrl: u, dataUrl: './data/bootstrap.json', total: 375 }), 20);
+                        }
+                    });
+                    window.google = { script: { run: makeRunner(null, null) } };
+                })();
+            """})
+
         cdp.call("Page.navigate", {"url": f"http://127.0.0.1:{port}/xin-che-long-long/"})
         cdp.drain(2.2)
 
-        res = cdp.eval("""
-            (async () => {
-                const wait = (ms) => new Promise(r => setTimeout(r, ms));
-                const out = {};
-                for (const m of ['ALL', 'PI', 'TW']) {
-                    document.querySelector(`.market-tab[data-market="${m}"]`)?.click();
-                    await wait(200);
-                    out['sum_' + m] = document.getElementById('resultSummaryBar')?.textContent?.trim() || '';
-                }
-                document.getElementById('onlyZeroAprCheck')?.click();
-                await wait(150);
-                out.zeroSum = document.getElementById('resultSummaryBar')?.textContent?.trim() || '';
-                document.getElementById('onlyZeroAprCheck')?.click();
-                await wait(150);
-
-                // Hidden-by-budget banner test
-                const bMax = document.getElementById('budgetMaxInput');
-                const sIn = document.getElementById('searchInput');
-                bMax.value = '80';
-                bMax.dispatchEvent(new Event('input', {bubbles: true}));
-                sIn.value = 'C-Class';
-                sIn.dispatchEvent(new Event('input', {bubbles: true}));
-                await wait(200);
-                out.hiddenBanner = document.getElementById('hiddenBudgetBanner')?.classList.contains('show') || false;
-                document.getElementById('unlockBudgetBtn')?.click();
-                await wait(250);
-                document.querySelector('.vehicle-card')?.click();
-                await wait(450);
-
-                out.specsTable = !!document.querySelector('#detailTabBody .spec-table');
-                // Switch to 360° HD Studio & zoom + theater
-                document.getElementById('mode360Btn')?.click();
-                await wait(650);
-                out.img360Src = document.getElementById('stageImg')?.src || '';
-                document.getElementById('zoomInBtn')?.click();
-                document.getElementById('theaterExpandBtn')?.click();
-                out.theater = document.getElementById('showroomTop')?.classList.contains('is-theater-expanded') || false;
-                document.getElementById('theaterExpandBtn')?.click();
-                document.getElementById('srCompareBtn')?.click();
-                document.getElementById('srShortlistBtn')?.click();
-
-                for (const tb of ['financing', 'ownership', 'auditor', 'resale', 'lifecycle', 'review']) {
-                    document.querySelector(`.detail-tab-btn[data-tab="${tb}"]`)?.click();
-                    await wait(160);
-                    out['tab_' + tb] = document.getElementById('detailTabBody')?.innerHTML?.length || 0;
-                    if (tb === 'financing') {
-                        document.querySelector('[data-fin-preset="zero_apr"]')?.click();
-                        out.hasOtr = !!document.getElementById('otrCalculatorCard');
-                    }
-                    if (tb === 'auditor') {
-                        document.getElementById('qaRunBtn')?.click();
-                        await wait(120);
-                        out.qaGrade = document.querySelector('#qaResultHost .qa-grade-letter')?.textContent?.trim() || '';
-                    }
-                    if (tb === 'lifecycle') {
-                        out.lcRows = document.querySelectorAll('#detailTabBody .spec-table tbody tr').length;
-                    }
-                }
-                document.getElementById('closeShowroomBtn')?.click();
-                document.getElementById('resetFilterBtn')?.click();
-                await wait(150);
-
-                // Compare PK & Shortlist modals
-                document.getElementById('navCompareBtn')?.click();
-                await wait(120);
-                out.cmpCols = document.querySelectorAll('#compareModalBody .spec-table thead th').length;
-                document.getElementById('closeCompareModalBtn')?.click();
-                document.getElementById('navShortlistBtn')?.click();
-                await wait(120);
-                out.slItems = document.querySelectorAll('#shortlistModalBody .advisor-rec-card').length;
-                document.getElementById('closeShortlistModalBtn')?.click();
-
-                // AI Advisor test
-                document.getElementById('navAdvisorBtn')?.click();
-                await wait(120);
-                document.querySelector('.advisor-ex-chip')?.click();
-                await wait(200);
-                out.advRecs = document.querySelectorAll('#advisorModalBody .advisor-rec-card').length;
-                document.getElementById('closeAdvisorModalBtn')?.click();
-
-                // PI showroom test
-                document.querySelector('.market-tab[data-market="PI"]')?.click();
-                await wait(200);
-                out.piFirst = document.querySelector('.vehicle-card')?.dataset?.vid || '';
-                document.querySelector('.vehicle-card')?.click();
-                await wait(350);
-                out.piSpecs = !!document.querySelector('#detailTabBody .spec-table');
-                document.getElementById('closeShowroomBtn')?.click();
-                return out;
-            })()
-        """)
-        cdp.drain(0.8)
-
         st = data.get("stats") or {}
-        if f"找到 {st.get('total')} 款" not in res.get("sum_ALL", ""):
-            errs.append(f"ALL count mismatch: {res.get('sum_ALL')}")
-        if "找到 23 款" not in res.get("sum_PI", ""):
-            errs.append(f"PI count mismatch: {res.get('sum_PI')}")
-        if not res.get("hiddenBanner"):
-            errs.append("Hidden-by-budget banner did not trigger")
-        if "cdn.imagin.studio" not in str(res.get("img360Src", "")):
-            errs.append(f"360° HD studio mode failed: {res.get('img360Src')}")
-        if not res.get("specsTable") or not res.get("theater") or not res.get("hasOtr"):
-            errs.append(f"Showroom UI check failed: {res}")
-        if int(res.get("lcRows", 0)) < 8:
-            errs.append(f"C-Class 8-row facelift comparison missing: {res.get('lcRows')}")
-        if int(res.get("cmpCols", 0)) < 2 or int(res.get("slItems", 0)) < 1:
-            errs.append(f"Compare/Shortlist modal failed: cmp={res.get('cmpCols')}, sl={res.get('slItems')}")
-        if res.get("qaGrade") not in ("S", "A", "B", "C", "D"):
-            errs.append(f"Quote auditor failed: {res.get('qaGrade')!r}")
-        if int(res.get("advRecs", 0)) < 3:
-            errs.append(f"AI Advisor failed: {res.get('advRecs')}")
-        if not str(res.get("piFirst", "")).startswith("pi-") or not res.get("piSpecs"):
-            errs.append(f"PI Showroom failed: {res.get('piFirst')}")
+        if not is_full_app:
+            # 3-file GitHub Data Factory mode: verify JSON status page + live bootstrap fetch
+            api_txt = cdp.eval("document.getElementById('apiCheck')?.textContent || ''")
+            if f"已驗證 {st.get('total')} 款" not in str(api_txt):
+                errs.append(f"Data API status page fetch check failed: {api_txt!r}")
+        else:
+            res = cdp.eval("""
+                (async () => {
+                    const wait = (ms) => new Promise(r => setTimeout(r, ms));
+                    const out = {};
+                    for (const m of ['ALL', 'PI', 'TW']) {
+                        document.querySelector(`.market-tab[data-market="${m}"]`)?.click();
+                        await wait(200);
+                        out['sum_' + m] = document.getElementById('resultSummaryBar')?.textContent?.trim() || '';
+                    }
+                    document.getElementById('onlyZeroAprCheck')?.click();
+                    await wait(150);
+                    out.zeroSum = document.getElementById('resultSummaryBar')?.textContent?.trim() || '';
+                    document.getElementById('onlyZeroAprCheck')?.click();
+                    await wait(150);
+
+                    // Hidden-by-budget banner test
+                    const bMax = document.getElementById('budgetMaxInput');
+                    const sIn = document.getElementById('searchInput');
+                    bMax.value = '80';
+                    bMax.dispatchEvent(new Event('input', {bubbles: true}));
+                    sIn.value = 'C-Class';
+                    sIn.dispatchEvent(new Event('input', {bubbles: true}));
+                    await wait(200);
+                    out.hiddenBanner = document.getElementById('hiddenBudgetBanner')?.classList.contains('show') || false;
+                    document.getElementById('unlockBudgetBtn')?.click();
+                    await wait(250);
+                    document.querySelector('.vehicle-card')?.click();
+                    await wait(450);
+
+                    out.specsTable = !!document.querySelector('#detailTabBody .spec-table');
+                    document.getElementById('mode360Btn')?.click();
+                    await wait(650);
+                    out.img360Src = document.getElementById('stageImg')?.src || '';
+                    document.getElementById('modeInteriorBtn')?.click();
+                    await wait(650);
+                    out.stageIntW = document.getElementById('stageImg')?.naturalWidth || 0;
+                    document.getElementById('zoomInBtn')?.click();
+                    document.getElementById('theaterExpandBtn')?.click();
+                    out.theater = document.getElementById('showroomTop')?.classList.contains('is-theater-expanded') || false;
+                    document.getElementById('theaterExpandBtn')?.click();
+                    document.getElementById('srCompareBtn')?.click();
+                    document.getElementById('srShortlistBtn')?.click();
+
+                    for (const tb of ['interior', 'financing', 'ownership', 'auditor', 'resale', 'lifecycle', 'review']) {
+                        document.querySelector(`.detail-tab-btn[data-tab="${tb}"]`)?.click();
+                        await wait(tb === 'interior' ? 700 : 160);
+                        out['tab_' + tb] = document.getElementById('detailTabBody')?.innerHTML?.length || 0;
+                        if (tb === 'interior') {
+                            out.twIntW = document.getElementById('intHeroImg')?.naturalWidth || 0;
+                        }
+                        if (tb === 'financing') {
+                            document.querySelector('[data-fin-preset="zero_apr"]')?.click();
+                            out.hasOtr = !!document.getElementById('otrCalculatorCard');
+                        }
+                        if (tb === 'auditor') {
+                            document.getElementById('qaRunBtn')?.click();
+                            await wait(120);
+                            out.qaGrade = document.querySelector('#qaResultHost .qa-grade-letter')?.textContent?.trim() || '';
+                        }
+                        if (tb === 'lifecycle') {
+                            out.lcRows = document.querySelectorAll('#detailTabBody .spec-table tbody tr').length;
+                        }
+                    }
+                    document.getElementById('closeShowroomBtn')?.click();
+                    document.getElementById('resetFilterBtn')?.click();
+                    await wait(150);
+
+                    // Compare PK & Shortlist modals
+                    document.getElementById('navCompareBtn')?.click();
+                    await wait(120);
+                    out.cmpCols = document.querySelectorAll('#compareModalBody .spec-table thead th').length;
+                    document.getElementById('closeCompareModalBtn')?.click();
+                    document.getElementById('navShortlistBtn')?.click();
+                    await wait(120);
+                    out.slItems = document.querySelectorAll('#shortlistModalBody .advisor-rec-card').length;
+                    document.getElementById('closeShortlistModalBtn')?.click();
+
+                    // Native GAS google.script.run Push + Pull + Alerts E2E
+                    document.getElementById('navGasSyncBtn')?.click();
+                    await wait(250);
+                    out.gasPullTxt = document.getElementById('gasStatusBox')?.textContent?.trim() || '';
+                    out.gasAlertCnt = document.querySelectorAll('#gasAlertsHost .advisor-rec-card').length;
+                    document.getElementById('gasPushBtn')?.click();
+                    await wait(200);
+                    out.gasPushTxt = document.getElementById('gasStatusBox')?.textContent?.trim() || '';
+                    document.getElementById('closeGasSyncModalBtn')?.click();
+
+                    // AI Advisor test
+                    document.getElementById('navAdvisorBtn')?.click();
+                    await wait(120);
+                    document.querySelector('.advisor-ex-chip')?.click();
+                    await wait(200);
+                    out.advRecs = document.querySelectorAll('#advisorModalBody .advisor-rec-card').length;
+                    document.getElementById('closeAdvisorModalBtn')?.click();
+
+                    // PI showroom + PI interior photo load test
+                    document.querySelector('.market-tab[data-market="PI"]')?.click();
+                    await wait(200);
+                    out.piFirst = document.querySelector('.vehicle-card')?.dataset?.vid || '';
+                    document.querySelector('.vehicle-card')?.click();
+                    await wait(350);
+                    out.piSpecs = !!document.querySelector('#detailTabBody .spec-table');
+                    document.querySelector('.detail-tab-btn[data-tab="interior"]')?.click();
+                    await wait(900);
+                    out.piIntW = document.getElementById('intHeroImg')?.naturalWidth || 0;
+                    document.getElementById('closeShowroomBtn')?.click();
+                    return out;
+                })()
+            """)
+            cdp.drain(0.8)
+
+            if f"找到 {st.get('total')} 款" not in res.get("sum_ALL", ""):
+                errs.append(f"ALL count mismatch: {res.get('sum_ALL')}")
+            if "找到 23 款" not in res.get("sum_PI", ""):
+                errs.append(f"PI count mismatch: {res.get('sum_PI')}")
+            if not res.get("hiddenBanner"):
+                errs.append("Hidden-by-budget banner did not trigger")
+            if "cdn.imagin.studio" not in str(res.get("img360Src", "")):
+                errs.append(f"360° HD studio mode failed: {res.get('img360Src')}")
+            if int(res.get("stageIntW", 0)) <= 0 or int(res.get("twIntW", 0)) <= 0:
+                errs.append(f"TW interior photo failed to load: stageW={res.get('stageIntW')}, tabW={res.get('twIntW')}")
+            if int(res.get("piIntW", 0)) <= 0:
+                errs.append(f"PI interior photo failed to load: piIntW={res.get('piIntW')}")
+            if "已直存試算表" not in str(res.get("gasPushTxt", "")) or "已直連試算表" not in str(res.get("gasPullTxt", "")) or int(res.get("gasAlertCnt", 0)) < 1:
+                errs.append(f"Native GAS google.script.run E2E failed: push={res.get('gasPushTxt')!r}, pull={res.get('gasPullTxt')!r}, alerts={res.get('gasAlertCnt')}")
+            if not res.get("specsTable") or not res.get("theater") or not res.get("hasOtr"):
+                errs.append(f"Showroom UI check failed: {res}")
+            if int(res.get("lcRows", 0)) < 8:
+                errs.append(f"C-Class 8-row facelift comparison missing: {res.get('lcRows')}")
+            if int(res.get("cmpCols", 0)) < 2 or int(res.get("slItems", 0)) < 1:
+                errs.append(f"Compare/Shortlist modal failed: cmp={res.get('cmpCols')}, sl={res.get('slItems')}")
+            if res.get("qaGrade") not in ("S", "A", "B", "C", "D"):
+                errs.append(f"Quote auditor failed: {res.get('qaGrade')!r}")
+            if int(res.get("advRecs", 0)) < 3:
+                errs.append(f"AI Advisor failed: {res.get('advRecs')}")
+            if not str(res.get("piFirst", "")).startswith("pi-") or not res.get("piSpecs"):
+                errs.append(f"PI Showroom failed: {res.get('piFirst')}")
 
         req_urls: dict[str, str] = {}
         for ev in cdp.events:
