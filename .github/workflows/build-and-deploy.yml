@@ -51,7 +51,7 @@ jobs:
           path: dist
 
   deploy:
-    name: 發布至永久免費 GitHub Pages
+    name: 發布至永久免費 GitHub Pages（＋選配同步個人 GAS）
     if: github.event_name != 'pull_request'
     needs: build-and-audit
     runs-on: ubuntu-latest
@@ -59,6 +59,23 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: 部署最新網站
+      - name: 部署最新靜態網站至 GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+      - name: （選配 Tier 2）若已設定 GAS_SCRIPT_ID 與 CLASPRC_JSON，自動同步 gas/Code.gs 至個人 GAS
+        uses: actions/checkout@v4
+      - name: 檢查並自動 clasp push（未設定金鑰時自動略過）
+        env:
+          GAS_SCRIPT_ID: ${{ secrets.GAS_SCRIPT_ID }}
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          if [ -n "$GAS_SCRIPT_ID" ] && [ -n "$CLASPRC_JSON" ] && [ -f "gas/Code.gs" ]; then
+            echo "$CLASPRC_JSON" > ~/.clasprc.json
+            printf '{"scriptId":"%s","rootDir":"gas"}\n' "$GAS_SCRIPT_ID" > .clasp.json
+            [ -f "gas/appsscript.json" ] || printf '{"timeZone":"Asia/Taipei","exceptionLogging":"STACKDRIVER","runtimeVersion":"V8","webapp":{"executeAs":"USER_DEPLOYING","access":"MYSELF"}}\n' > gas/appsscript.json
+            npx --yes @google/clasp push --force
+            echo "✅ 已自動將最新 gas/Code.gs 與 gas/Index.html 推送至個人 GAS！"
+          else
+            echo "ℹ️ 未設定 GAS clasp Secrets，略過自動同步（手動將 Code.gs＋Index.html 貼至 GAS 同樣完全運作）。"
+          fi
