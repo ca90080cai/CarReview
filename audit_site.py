@@ -223,12 +223,13 @@ def layer1_data_and_privacy(dist_dir: Path, data: dict) -> list[str]:
                 if bh in iu:
                     errs.append(f"Forbidden/ORB interior image host {bh} in {v['id']}")
 
-    # Audit personal GAS companion/host (gas/Code.gs) if present in repo
+    # Audit pure single-file GAS host (gas/Code.gs) if present in repo
     gas_p = ROOT_DIR / "gas" / "Code.gs"
     if gas_p.is_file():
         gtxt = gas_p.read_text(encoding="utf-8")
         for fn in (
-            "function doGet", "HtmlService.createTemplateFromFile",
+            "function doGet", "HtmlService.createHtmlOutput",
+            "function _renderEmbeddedAppHtml", "const APP_HTML_CHUNKS = [",
             "function installAutonomousTriggers", "function dailyCatalogMonitor",
             "function apiLoadCloudState", "function apiSaveCloudState",
             "function apiSaveDataSourceUrl", "LockService.getScriptLock",
@@ -344,6 +345,21 @@ def layer4_chrome_e2e(dist_dir: Path, data: dict) -> list[str]:
         cdp = _SimpleCDP(ws_url)
         for dom in ("Page", "Runtime", "Network", "Log"):
             cdp.call(f"{dom}.enable")
+
+        # Real Chrome V8 syntax + render validation on pure single-file gas/Code.gs!
+        gas_code_p = ROOT_DIR / "gas" / "Code.gs"
+        if gas_code_p.is_file():
+            gs_src_json = json.dumps(gas_code_p.read_text(encoding="utf-8"))
+            v8_check = cdp.eval(f"""
+                (() => {{
+                    const src = {gs_src_json};
+                    const fn = new Function(src + "\\nreturn _renderEmbeddedAppHtml({{isGas:true,dataUrl:'./data/bootstrap.json'}});");
+                    const rendered = fn();
+                    return {{ ok: rendered.startsWith('<!DOCTYPE html>') && rendered.includes('"isGas":true') && rendered.includes('</html>'), len: rendered.length }};
+                }})()
+            """)
+            if not (v8_check and v8_check.get("ok")):
+                errs.append(f"gas/Code.gs V8 syntax/render check failed: {v8_check}")
 
         # Inject realistic GAS google.script.run runtime mock before Index.html executes
         if is_full_app:
