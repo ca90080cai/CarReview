@@ -1281,11 +1281,16 @@ def build_site(out_dir: Path, workers: int = 16) -> dict[str, Any]:
     (out_dir / "data" / "bootstrap.json").write_text(json.dumps(bootstrap, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
     # Support BOTH modes:
-    # 1) 3-file pure GitHub Data Factory (no HTML pasted on GitHub -> generate clean API status index.html)
-    # 2) Full local/CI verification (gas/Index.html present -> copy for Chrome E2E audit)
-    src_html = next((p for p in (ROOT_DIR / "gas" / "Index.html", ROOT_DIR / "web_app.html") if p.is_file()), None)
-    if src_html:
-        shutil.copy2(src_html, out_dir / "index.html")
+    # 1) Pure single-file gas/Code.gs present locally -> extract exact embedded HTML for Chrome E2E!
+    # 2) 3-file pure GitHub Data Factory (no gas/ folder on GitHub -> generate clean JSON API status page)
+    extracted_html = None
+    gas_code_p = ROOT_DIR / "gas" / "Code.gs"
+    if gas_code_p.is_file():
+        m_ch = re.search(r"const APP_HTML_CHUNKS = (\[.*\n\]);", gas_code_p.read_text(encoding="utf-8"), re.S)
+        if m_ch:
+            extracted_html = "\n".join(json.loads(m_ch.group(1)))
+    if extracted_html:
+        (out_dir / "index.html").write_text(extracted_html, encoding="utf-8")
     else:
         int_total = sum(len(v["interior"]["photos"]) for v in all_vehicles)
         status_html = f"""<!DOCTYPE html><html lang="zh-Hant-TW"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>🐉 新車龍龍｜雲端車庫 JSON 資料引擎</title><link rel="icon" href="./favicon.ico" type="image/svg+xml"></head><body style="font-family:sans-serif;background:#0b1120;color:#f1f5f9;padding:36px;max-width:720px;margin:0 auto;line-height:1.7"><h1>🐉 新車龍龍｜雲端車庫資料中心運行中</h1><p>本 GitHub Pages 專責每日自動同步最新台灣現行新車與真實內裝圖資，提供你的 <b>個人 Google Apps Script (GAS)</b> 網頁應用程式即時讀取。</p><ul><li>台灣總代理新車：<b>{len(tw_clean)}</b> 款（{len(brands_tw)} 品牌）</li><li>全新貿易商限定：<b>{len(pi_clean)}</b> 款（{len(brands_pi)} 品牌）</li><li>原廠分期 0 利率：<b>{zero_apr_cnt}</b> 款</li><li>真實內裝實拍圖：<b>{int_total}</b> 張（覆蓋率 100%）</li><li>最近重建時間：<b>{now_iso}</b></li></ul><p id="apiCheck">資料端點：<a style="color:#60a5fa" href="./data/bootstrap.json">./data/bootstrap.json</a></p><script>fetch('./data/bootstrap.json').then(r=>r.json()).then(d=>{{document.getElementById('apiCheck').innerHTML+=' — ✅ 已驗證 '+d.vehicles.length+' 款車資可正常讀取';}});</script></body></html>"""
