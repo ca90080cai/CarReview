@@ -75,7 +75,7 @@ jobs:
             printf '{"scriptId":"%s","rootDir":"gas"}\n' "$GAS_SCRIPT_ID" > .clasp.json
             [ -f "gas/appsscript.json" ] || printf '{"timeZone":"Asia/Taipei","exceptionLogging":"STACKDRIVER","runtimeVersion":"V8","webapp":{"executeAs":"USER_DEPLOYING","access":"MYSELF"}}\n' > gas/appsscript.json
             npx --yes @google/clasp push --force
-            echo "✅ 已自動將最新 gas/Code.gs 與 gas/Index.html 推送至個人 GAS！"
+            echo "✅ 已自動將最新單檔 gas/Code.gs 推送至個人 GAS！"
           else
-            echo "ℹ️ 未設定 GAS clasp Secrets，略過自動同步（手動將 Code.gs＋Index.html 貼至 GAS 同樣完全運作）。"
+            echo "ℹ️ 未設定 GAS clasp Secrets，略過自動同步（手動將單檔 gas/Code.gs 貼至 GAS 同樣完全運作）。"
           fi
